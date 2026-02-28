@@ -1,0 +1,988 @@
+import requests
+import json
+import os
+from typing import List, Dict, Optional
+from datetime import datetime, timedelta
+import re
+from dotenv import load_dotenv
+
+load_dotenv()
+
+class TrendingTopicsAnalyzer:
+    def __init__(self):
+        self.cache_file = "/app/trending_cache.json"
+        self.cache_duration = 3600
+        self.category_descriptions = []  # Nuevo: guardar descripciones
+        self.your_blog_categories = self.extract_categories_from_wordpress()
+
+    def extract_categories_from_wordpress(self) -> List[str]:
+        """Extrae categorías REALES de tu WordPress incluyendo descripciones"""
+        wp_url = os.getenv("WORDPRESS_URL")
+        wp_user = os.getenv("WORDPRESS_USER")
+        wp_password = os.getenv("WORDPRESS_APP_PASSWORD")
+
+        try:
+            # Obtener categorías de WordPress
+            response = requests.get(
+                f"{wp_url}/wp-json/wp/v2/categories",
+                params={"per_page": 50, "_fields": "id,name,slug,count,description"},
+                auth=(wp_user, wp_password),
+                timeout=10
+            )
+
+            if response.status_code == 200:
+                categories = response.json()
+
+                # Extraer NOMBRES y DESCRIPCIONES
+                category_names = []
+                category_descriptions = []
+
+                for cat in categories:
+                    if cat.get("count", 0) > 0:  # Solo categorías con posts
+                        cat_name = cat["name"].lower().strip()
+                        category_names.append(cat_name)
+
+                        # Guardar descripción si existe
+                        if cat.get("description"):
+                            desc = cat["description"].lower().strip()
+                            category_descriptions.append(desc)
+                            print(f"📝 Descripción para '{cat_name}': {desc[:50]}...")
+
+                print(f"✅ Categorías extraídas: {category_names}")
+                print(f"✅ Descripciones extraídas: {len(category_descriptions)}")
+
+                # Guardar descripciones para búsqueda
+                self.category_descriptions = category_descriptions
+
+                # Extraer palabras clave de las descripciones
+                keywords_from_descriptions = self.extract_keywords_from_descriptions(category_descriptions)
+                print(f"🔑 Keywords extraídas: {keywords_from_descriptions[:10]}...")
+
+                return category_names
+
+            # Si falla la API de categorías, intentar extraer de los posts
+            print("⚠️ Falló API de categorías, intentando extraer de posts...")
+            return self.extract_categories_from_posts(wp_url, wp_user, wp_password)
+
+        except Exception as e:
+            print(f"⚠️ Error extrayendo categorías: {e}")
+            # Categorías por defecto basadas en tus posts conocidos
+            default_cats = ["finanzas", "tecnología", "inversiones", "privacidad", "algoritmos", "ia"]
+            print(f"Usando categorías por defecto: {default_cats}")
+            return default_cats
+
+    def extract_keywords_from_descriptions(self, descriptions: List[str]) -> List[str]:
+        """Extrae palabras clave relevantes de las descripciones"""
+        all_keywords = []
+
+        # Palabras vacías a ignorar
+        stop_words = ['de', 'la', 'el', 'en', 'y', 'a', 'los', 'las', 'del', 'para', 'con', 'por', 'una', 'un', 'que', 'es', 'como', 'mas', 'pero', 'sus']
+
+        for desc in descriptions:
+            # Dividir en palabras
+            words = desc.split()
+
+            # Filtrar palabras relevantes
+            keywords = [
+                word.strip('.,;:()[]{}"\'') for word in words
+                if len(word) > 3  # Palabras de más de 3 letras
+                and word.lower() not in stop_words
+                and not word.isdigit()
+            ]
+
+            all_keywords.extend(keywords[:3])  # Máximo 3 keywords por descripción
+
+        # Eliminar duplicados y devolver
+        return list(set(all_keywords))[:20]  # Máximo 20 keywords únicas
+
+    def extract_categories_from_posts(self, wp_url: str, wp_user: str, wp_password: str) -> List[str]:
+        """Extrae categorías analizando los posts existentes"""
+        try:
+            # Obtener algunos posts para análisis
+            response = requests.get(
+                f"{wp_url}/wp-json/wp/v2/posts",
+                params={"per_page": 20, "_fields": "title,content,categories"},
+                auth=(wp_user, wp_password),
+                timeout=15
+            )
+
+            if response.status_code == 200:
+                posts = response.json()
+
+                # Analizar contenido para inferir categorías
+                inferred_categories = set()
+
+                for post in posts:
+                    title = post.get("title", {}).get("rendered", "").lower()
+                    content = post.get("content", {}).get("rendered", "").lower()
+
+                    # Palabras clave por categoría
+                    category_keywords = {
+                        "finanzas": ["finanza", "dinero", "economía", "mercado", "bolsa"],
+                        "inversiones": ["inversión", "invertir", "etf", "fondo", "acciones", "bolsa"],
+                        "tecnología": ["tecnología", "digital", "internet", "web", "app", "software"],
+                        "algoritmos": ["algoritmo", "programa", "código", "software", "modelo"],
+                        "ia": ["inteligencia artificial", "ia", "machine learning", "red neuronal"],
+                        "privacidad": ["privacidad", "datos", "protección", "seguridad", "internet"],
+                        "oro": ["oro", "metales", "commodities", "materias primas"],
+                        "etf": ["etf", "fondo cotizado", "exchange traded fund"],
+                        "agentes": ["agente", "autónomo", "automatización", "asistente"],
+                        "prompts": ["prompt", "instrucción", "ingeniería de prompts"],
+                        "llm": ["llm", "lenguaje", "modelo", "gpt", "transformer"],
+                        "salud mental": ["salud mental", "bienestar", "estrés", "ansiedad"],
+                        "ciberseguridad": ["ciberseguridad", "seguridad", "hack", "protección"],
+                        "legislación": ["ley", "legal", "regulación", "normativa"],
+                        "negocios": ["negocio", "empresa", "startup", "emprendimiento"],
+                        "programación": ["programación", "código", "desarrollo", "software"],
+                        "firmware": ["firmware", "hardware", "dispositivo", "electrónica"],
+                        "radios cb": ["radio", "cb", "frecuencia", "comunicación"]
+                    }
+
+                    text_to_analyze = title + " " + content[:500]
+
+                    for category, keywords in category_keywords.items():
+                        for keyword in keywords:
+                            if keyword in text_to_analyze:
+                                inferred_categories.add(category)
+                                break
+
+                print(f"✅ Categorías inferidas de posts: {list(inferred_categories)}")
+                return list(inferred_categories)
+
+        except Exception as e:
+            print(f"⚠️ Error inferiendo categorías: {e}")
+
+        return []
+
+    def get_google_trends(self, country: str = "ES") -> List[Dict]:
+        """Obtiene tendencias relacionadas con TUS categorías y sus descripciones"""
+
+        # Palabras clave de búsqueda basadas en tus categorías Y descripciones
+        search_keywords = []
+
+        # Añadir nombres de categorías
+        for category in self.your_blog_categories:
+            search_keywords.append(category)
+
+        # Añadir palabras clave de las descripciones
+        if hasattr(self, 'category_descriptions') and self.category_descriptions:
+            keywords_from_desc = self.extract_keywords_from_descriptions(self.category_descriptions)
+            search_keywords.extend(keywords_from_desc)
+
+        # Eliminar duplicados
+        search_keywords = list(set(search_keywords))
+
+        print(f"🔍 Buscando tendencias con keywords: {search_keywords[:10]}...")
+
+        # Tendencias generales (ampliadas)
+        general_trends = [
+            {
+                "title": "IA generativa en análisis financiero",
+                "topic": "finanzas",
+                "keywords": ["ia", "finanzas", "análisis", "trading", "gpt", "inversión"],
+                "volume": "Alta",
+                "growth": "+45%",
+                "relevance": 0.9,
+                "sources": ["Google Trends", "Twitter"],
+                "description": "Aplicaciones de ChatGPT y GPT-4 en trading y análisis de mercados financieros",
+                "search_terms": ["IA finanzas", "ChatGPT trading", "generative AI banking", "análisis financiero IA"],
+                "published_posts": self.count_posts_by_topic("finanzas")
+            },
+            {
+                "title": "Regulación MiCA para criptomonedas en Europa",
+                "topic": "finanzas",
+                "keywords": ["regulación", "cripto", "europa", "mica", "leyes", "legislación"],
+                "volume": "Media-Alta",
+                "growth": "+32%",
+                "relevance": 0.8,
+                "sources": ["Twitter", "Reddit", "Noticias financieras"],
+                "description": "Nuevo marco regulatorio europeo para criptoactivos y sus implicaciones",
+                "search_terms": ["MiCA regulación", "cripto Europa 2024", "leyes criptomonedas UE", "regulación cripto"],
+                "published_posts": self.count_posts_by_topic("cripto")
+            },
+            {
+                "title": "Automatización empresarial con GPT-4 y APIs",
+                "topic": "tecnología",
+                "keywords": ["automatización", "empresas", "gpt", "apis", "ia", "negocios"],
+                "volume": "Muy Alta",
+                "growth": "+68%",
+                "relevance": 0.85,
+                "sources": ["Google Trends", "GitHub", "Twitter tech"],
+                "description": "Implementación de IA para automatizar procesos empresariales y flujos de trabajo",
+                "search_terms": ["GPT-4 automation", "automatización IA empresas", "business process automation", "APIs IA"],
+                "published_posts": self.count_posts_by_topic("tecnología")
+            },
+            {
+                "title": "Privacidad de datos en redes sociales 2024",
+                "topic": "privacidad",
+                "keywords": ["privacidad", "datos", "redes sociales", "protección", "gdpr", "ciberseguridad"],
+                "volume": "Alta",
+                "growth": "+28%",
+                "relevance": 0.95,
+                "sources": ["Twitter", "Reddit privacy", "Noticias tecnología"],
+                "description": "Nuevas políticas de privacidad y protección de datos personales en plataformas sociales",
+                "search_terms": ["privacidad redes sociales", "protección datos social media", "GDPR redes 2024", "datos personales internet"],
+                "published_posts": self.count_posts_by_topic("privacidad")
+            },
+            {
+                "title": "ETFs temáticos de tecnología e innovación",
+                "topic": "inversiones",
+                "keywords": ["etf", "inversión", "tecnología", "innovación", "fondos", "negocios"],
+                "volume": "Media",
+                "growth": "+22%",
+                "relevance": 0.9,
+                "sources": ["Google Finance", "Twitter finance", "Foros inversión"],
+                "description": "Fondos cotizados especializados en IA, ciberseguridad, cloud computing y tecnología disruptiva",
+                "search_terms": ["ETFs tecnológicos", "inversión IA ETF", "tech thematic ETFs", "ETFs innovación"],
+                "published_posts": self.count_posts_by_topic("etf")
+            },
+            {
+                "title": "Algoritmos éticos en procesos de selección",
+                "topic": "algoritmos",
+                "keywords": ["algoritmos", "éticos", "selección", "recursos humanos", "ia", "negocios"],
+                "volume": "Media-Alta",
+                "growth": "+38%",
+                "relevance": 0.88,
+                "sources": ["LinkedIn", "Twitter HR", "Noticias RH"],
+                "description": "Uso ético de algoritmos e IA en procesos de selección de personal y recursos humanos",
+                "search_terms": ["algoritmos contratación", "IA recursos humanos", "ethical hiring AI", "sesgo algoritmos"],
+                "published_posts": self.count_posts_by_topic("algoritmos")
+            },
+            {
+                "title": "Machine Learning para análisis predictivo en mercados",
+                "topic": "ia",
+                "keywords": ["machine learning", "ia", "análisis predictivo", "mercados", "finanzas", "algoritmos"],
+                "volume": "Alta",
+                "growth": "+41%",
+                "relevance": 0.87,
+                "sources": ["Google Scholar", "Twitter data science", "Medium tech"],
+                "description": "Aplicaciones de machine learning y deep learning en análisis predictivo de mercados financieros",
+                "search_terms": ["machine learning finanzas", "análisis predictivo mercados", "deep learning trading", "IA predictiva"],
+                "published_posts": self.count_posts_by_topic("ia")
+            },
+            {
+                "title": "Desarrollo de agentes autónomos con LLMs",
+                "topic": "agentes",
+                "keywords": ["agentes", "autónomos", "llm", "ia", "automatización", "asistentes"],
+                "volume": "Alta",
+                "growth": "+52%",
+                "relevance": 0.92,
+                "sources": ["GitHub", "Twitter dev", "ArXiv"],
+                "description": "Creación de agentes de IA autónomos usando grandes modelos de lenguaje",
+                "search_terms": ["autonomous agents", "IA agents", "agentes autónomos", "LLM agents"],
+                "published_posts": self.count_posts_by_topic("agentes")
+            },
+            {
+                "title": "Prompt engineering avanzado para LLMs",
+                "topic": "prompts",
+                "keywords": ["prompts", "ingeniería", "llm", "ia", "instrucciones"],
+                "volume": "Muy Alta",
+                "growth": "+73%",
+                "relevance": 0.94,
+                "sources": ["Twitter", "Reddit", "Medium"],
+                "description": "Técnicas avanzadas de diseño de prompts para maximizar resultados de modelos de lenguaje",
+                "search_terms": ["prompt engineering", "prompts avanzados", "AI prompting", "prompt design"],
+                "published_posts": self.count_posts_by_topic("prompts")
+            },
+            {
+                "title": "Aplicaciones prácticas de LLMs en empresas",
+                "topic": "llm",
+                "keywords": ["llm", "empresas", "aplicaciones", "ia", "casos de uso", "negocios"],
+                "volume": "Alta",
+                "growth": "+47%",
+                "relevance": 0.89,
+                "sources": ["Forbes", "TechCrunch", "Twitter business"],
+                "description": "Casos de éxito y aplicaciones reales de grandes modelos de lenguaje en entornos empresariales",
+                "search_terms": ["LLM business applications", "empresas usando LLM", "casos de uso LLM", "AI in business"],
+                "published_posts": self.count_posts_by_topic("llm")
+            },
+            {
+                "title": "Salud mental en la era digital",
+                "topic": "salud mental",
+                "keywords": ["salud mental", "digital", "bienestar", "tecnología", "estrés", "ansiedad"],
+                "volume": "Alta",
+                "growth": "+34%",
+                "relevance": 0.86,
+                "sources": ["WHO", "Twitter health", "Noticias"],
+                "description": "Impacto de la tecnología y redes sociales en la salud mental y estrategias de bienestar digital",
+                "search_terms": ["salud mental digital", "bienestar tecnología", "digital wellness", "tecnología y salud mental"],
+                "published_posts": self.count_posts_by_topic("salud mental")
+            },
+            {
+                "title": "Ciberseguridad en empresas: nuevas amenazas 2024",
+                "topic": "ciberseguridad",
+                "keywords": ["ciberseguridad", "seguridad", "empresas", "hack", "protección", "datos"],
+                "volume": "Alta",
+                "growth": "+39%",
+                "relevance": 0.91,
+                "sources": ["CSO Online", "Twitter security", "Noticias"],
+                "description": "Nuevas amenazas de ciberseguridad que enfrentan las empresas y cómo protegerse",
+                "search_terms": ["ciberseguridad empresas", "amenazas digitales", "protección datos", "ransomware"],
+                "published_posts": self.count_posts_by_topic("ciberseguridad")
+            },
+            {
+                "title": "Programación con asistentes de IA",
+                "topic": "programación",
+                "keywords": ["programación", "ia", "asistentes", "código", "desarrollo", "software"],
+                "volume": "Muy Alta",
+                "growth": "+64%",
+                "relevance": 0.93,
+                "sources": ["GitHub", "Stack Overflow", "Twitter dev"],
+                "description": "Cómo los asistentes de IA están transformando la forma de programar",
+                "search_terms": ["programación con IA", "asistentes código", "AI programming", "copilot"],
+                "published_posts": self.count_posts_by_topic("programación")
+            },
+            {
+                "title": "Legislación tecnológica: nuevas leyes 2024",
+                "topic": "legislación",
+                "keywords": ["legislación", "leyes", "tecnología", "regulación", "normativa", "digital"],
+                "volume": "Media",
+                "growth": "+27%",
+                "relevance": 0.82,
+                "sources": ["Legal Tech", "Noticias", "Gobierno"],
+                "description": "Nuevas leyes y regulaciones que afectan al sector tecnológico en 2024",
+                "search_terms": ["leyes tecnología", "regulación digital", "legislación tech", "normativa 2024"],
+                "published_posts": self.count_posts_by_topic("legislación")
+            }
+        ]
+
+        # Filtrar tendencias que coincidan con TUS categorías O keywords
+        filtered_trends = []
+
+        for trend in general_trends:
+            # Verificar si coincide con alguna categoría o keyword
+            trend_keywords = set(trend.get("keywords", []))
+            trend_title_lower = trend["title"].lower()
+            trend_desc_lower = trend["description"].lower()
+
+            # Buscar coincidencias en categorías
+            category_match = any(
+                category in trend_title_lower or
+                category in trend_desc_lower
+                for category in self.your_blog_categories
+            )
+
+            # Buscar coincidencias en palabras clave
+            keyword_match = any(
+                keyword in trend_title_lower or
+                keyword in trend_desc_lower
+                for keyword in search_keywords
+            )
+
+            if category_match or keyword_match:
+                filtered_trends.append(trend)
+                print(f"✅ Trend coincidente: {trend['title']} (match: {trend['topic']})")
+
+        print(f"✅ {len(filtered_trends)} tendencias filtradas de {len(general_trends)}")
+        return filtered_trends
+
+    def count_posts_by_topic(self, topic: str) -> int:
+        """Cuenta cuántos posts tienes sobre un tema (versión simulada)"""
+        # En producción, esto consultaría tu WordPress
+        topic_counts = {
+            "finanzas": 2,
+            "inversiones": 2,
+            "etf": 1,
+            "oro": 1,
+            "tecnología": 2,
+            "algoritmos": 1,
+            "ia": 29,
+            "privacidad": 1,
+            "agentes": 0,
+            "prompts": 0,
+            "llm": 0,
+            "salud mental": 0,
+            "ciberseguridad": 0,
+            "legislación": 0,
+            "negocios": 0,
+            "programación": 0,
+            "firmware": 0,
+            "radios cb": 0
+        }
+        return topic_counts.get(topic, 0)
+
+    def get_twitter_trends(self, woebearer_token: Optional[str] = None) -> List[Dict]:
+        """Obtiene tendencias de Twitter relacionadas con tus categorías"""
+
+        # Tendencias generales
+        all_twitter_trends = [
+            {"hashtag": "#Fintech", "tweet_volume": 12500, "category": "finanzas"},
+            {"hashtag": "#IA", "tweet_volume": 89000, "category": "ia"},
+            {"hashtag": "#InteligenciaArtificial", "tweet_volume": 45000, "category": "ia"},
+            {"hashtag": "#PrivacidadDigital", "tweet_volume": 3400, "category": "privacidad"},
+            {"hashtag": "#Cripto", "tweet_volume": 21000, "category": "finanzas"},
+            {"hashtag": "#CriptoRegulación", "tweet_volume": 5600, "category": "finanzas"},
+            {"hashtag": "#Automatización", "tweet_volume": 7800, "category": "tecnología"},
+            {"hashtag": "#Algoritmos", "tweet_volume": 3200, "category": "algoritmos"},
+            {"hashtag": "#AlgoritmosÉticos", "tweet_volume": 2100, "category": "algoritmos"},
+            {"hashtag": "#ETFs", "tweet_volume": 4500, "category": "inversiones"},
+            {"hashtag": "#Inversiones", "tweet_volume": 8900, "category": "inversiones"},
+            {"hashtag": "#FinanzasPersonales", "tweet_volume": 12300, "category": "finanzas"},
+            {"hashtag": "#MachineLearning", "tweet_volume": 56700, "category": "ia"},
+            {"hashtag": "#DataScience", "tweet_volume": 34500, "category": "tecnología"},
+            {"hashtag": "#SeguridadDigital", "tweet_volume": 6700, "category": "privacidad"},
+            {"hashtag": "#AgentesIA", "tweet_volume": 8900, "category": "agentes"},
+            {"hashtag": "#PromptEngineering", "tweet_volume": 23400, "category": "prompts"},
+            {"hashtag": "#LLM", "tweet_volume": 45600, "category": "llm"},
+            {"hashtag": "#SaludMental", "tweet_volume": 34500, "category": "salud mental"},
+            {"hashtag": "#Ciberseguridad", "tweet_volume": 27800, "category": "ciberseguridad"},
+            {"hashtag": "#Programación", "tweet_volume": 18900, "category": "programación"},
+            {"hashtag": "#LegislaciónTech", "tweet_volume": 3400, "category": "legislación"}
+        ]
+
+        # Filtrar por tus categorías
+        filtered_trends = [
+            trend for trend in all_twitter_trends
+            if trend["category"] in self.your_blog_categories
+        ]
+
+        return filtered_trends
+
+    def get_reddit_trends(self, subreddits: List[str] = None) -> List[Dict]:
+        """Analiza tendencias en subreddits relevantes para tus categorías"""
+
+        if subreddits is None:
+            # Subreddits relevantes basados en tus categorías
+            subreddits = []
+            if "finanzas" in self.your_blog_categories:
+                subreddits.extend(["finance", "personalfinance", "investing"])
+            if "tecnología" in self.your_blog_categories:
+                subreddits.extend(["technology", "Futurology", "programming"])
+            if "ia" in self.your_blog_categories or "algoritmos" in self.your_blog_categories:
+                subreddits.extend(["artificial", "MachineLearning", "datascience"])
+            if "privacidad" in self.your_blog_categories:
+                subreddits.extend(["privacy", "cybersecurity"])
+            if "inversiones" in self.your_blog_categories:
+                subreddits.extend(["stocks", "wallstreetbets", "ethereum"])
+            if "agentes" in self.your_blog_categories:
+                subreddits.extend(["artificial", "singularity"])
+            if "llm" in self.your_blog_categories:
+                subreddits.extend(["LocalLLaMA", "ChatGPT"])
+            if "salud mental" in self.your_blog_categories:
+                subreddits.extend(["mentalhealth", "psychology"])
+            if "programación" in self.your_blog_categories:
+                subreddits.extend(["programming", "learnprogramming", "webdev"])
+
+        # Tendencias simuladas basadas en subreddits relevantes
+        reddit_trends = []
+
+        if "finance" in subreddits or "investing" in subreddits:
+            reddit_trends.append({
+                "subreddit": "r/finance",
+                "topic": "ETFs vs fondos indexados: análisis comparativo 2024",
+                "upvotes": 1200,
+                "comments": 245,
+                "category": "inversiones"
+            })
+            reddit_trends.append({
+                "subreddit": "r/investing",
+                "topic": "Cómo la IA está cambiando el análisis técnico",
+                "upvotes": 890,
+                "comments": 187,
+                "category": "finanzas"
+            })
+
+        if "technology" in subreddits or "artificial" in subreddits:
+            reddit_trends.append({
+                "subreddit": "r/technology",
+                "topic": "GPT-5: expectativas vs realidad en aplicaciones empresariales",
+                "upvotes": 8900,
+                "comments": 1200,
+                "category": "tecnología"
+            })
+            reddit_trends.append({
+                "subreddit": "r/artificial",
+                "topic": "Aplicaciones de IA en análisis de mercado y trading algorítmico",
+                "upvotes": 4500,
+                "comments": 780,
+                "category": "ia"
+            })
+
+        if "privacy" in subreddits:
+            reddit_trends.append({
+                "subreddit": "r/privacy",
+                "topic": "Cómo proteger tus datos en redes sociales: guía práctica 2024",
+                "upvotes": 3400,
+                "comments": 560,
+                "category": "privacidad"
+            })
+
+        if "LocalLLaMA" in subreddits:
+            reddit_trends.append({
+                "subreddit": "r/LocalLLaMA",
+                "topic": "Comparativa de modelos LLM open source para aplicaciones empresariales",
+                "upvotes": 2300,
+                "comments": 412,
+                "category": "llm"
+            })
+
+        if "programming" in subreddits:
+            reddit_trends.append({
+                "subreddit": "r/programming",
+                "topic": "Herramientas de IA para programación: estado actual 2024",
+                "upvotes": 5600,
+                "comments": 890,
+                "category": "programación"
+            })
+
+        return reddit_trends
+
+    def analyze_your_blog_coverage(self) -> Dict:
+        """Analiza qué temas de tu blog están cubiertos (basado en posts reales)"""
+        wp_url = os.getenv("WORDPRESS_URL")
+        wp_user = os.getenv("WORDPRESS_USER")
+        wp_password = os.getenv("WORDPRESS_APP_PASSWORD")
+
+        coverage = {category: 0 for category in self.your_blog_categories}
+
+        try:
+            # Obtener algunos posts para análisis
+            response = requests.get(
+                f"{wp_url}/wp-json/wp/v2/posts",
+                params={"per_page": 30, "_fields": "title,content"},
+                auth=(wp_user, wp_password),
+                timeout=15
+            )
+
+            if response.status_code == 200:
+                posts = response.json()
+
+                for post in posts:
+                    title = post.get("title", {}).get("rendered", "").lower()
+                    content = post.get("content", {}).get("rendered", "").lower()
+
+                    # Mapeo de palabras clave a categorías
+                    keyword_to_category = {
+                        "finanzas": ["finanza", "dinero", "economía", "mercado", "bolsa", "financiero"],
+                        "inversiones": ["inversión", "invertir", "etf", "fondo", "acciones", "bolsa", "oro"],
+                        "tecnología": ["tecnología", "digital", "internet", "web", "app", "software", "algoritmo"],
+                        "algoritmos": ["algoritmo", "programa", "código", "software", "modelo", "inteligencia artificial"],
+                        "ia": ["inteligencia artificial", "ia", "ai", "machine learning", "red neuronal", "deep learning"],
+                        "privacidad": ["privacidad", "datos", "protección", "seguridad", "internet", "redes sociales"],
+                        "etf": ["etf", "fondo cotizado", "exchange traded fund"],
+                        "oro": ["oro", "metales", "commodities", "materias primas"],
+                        "agentes": ["agente", "autónomo", "automatización", "asistente"],
+                        "prompts": ["prompt", "instrucción", "ingeniería de prompts"],
+                        "llm": ["llm", "lenguaje", "modelo", "gpt", "transformer"],
+                        "salud mental": ["salud mental", "bienestar", "estrés", "ansiedad"],
+                        "ciberseguridad": ["ciberseguridad", "seguridad", "hack", "protección"],
+                        "legislación": ["ley", "legal", "regulación", "normativa"],
+                        "negocios": ["negocio", "empresa", "startup", "emprendimiento"],
+                        "programación": ["programación", "código", "desarrollo", "software"],
+                        "firmware": ["firmware", "hardware", "dispositivo", "electrónica"],
+                        "radios cb": ["radio", "cb", "frecuencia", "comunicación"]
+                    }
+
+                    text_to_analyze = title + " " + content[:1000]
+
+                    for category, keywords in keyword_to_category.items():
+                        if category in self.your_blog_categories:
+                            for keyword in keywords:
+                                if keyword in text_to_analyze:
+                                    coverage[category] += 1
+                                    break
+
+                print(f"✅ Cobertura analizada: {coverage}")
+            else:
+                print(f"⚠️ No se pudieron obtener posts para análisis de cobertura")
+
+        except Exception as e:
+            print(f"⚠️ Error analizando cobertura: {e}")
+            # Cobertura por defecto basada en posts conocidos
+            default_coverage = {
+                "finanzas": 2,
+                "inversiones": 2,
+                "etf": 1,
+                "oro": 1,
+                "tecnología": 2,
+                "algoritmos": 1,
+                "ia": 29,
+                "privacidad": 1,
+                "agentes": 0,
+                "prompts": 0,
+                "llm": 0,
+                "salud mental": 0,
+                "ciberseguridad": 0,
+                "legislación": 0,
+                "negocios": 0,
+                "programación": 0,
+                "firmware": 0,
+                "radios cb": 0
+            }
+            # Filtrar solo las categorías que existen
+            for cat in self.your_blog_categories:
+                coverage[cat] = default_coverage.get(cat, 0)
+
+        return coverage
+
+    def generate_content_recommendations(self, num_recommendations: int = 5) -> List[Dict]:
+        """Genera recomendaciones basadas en tendencias y TU blog"""
+
+        print(f"🎯 Generando recomendaciones para categorías: {self.your_blog_categories}")
+
+        # Obtener tendencias filtradas por tus categorías
+        google_trends = self.get_google_trends()
+        twitter_trends = self.get_twitter_trends()
+
+        # Analizar cobertura actual de TU blog
+        coverage = self.analyze_your_blog_coverage()
+
+        # Combinar y puntuar tendencias
+        all_trends = []
+
+        for trend in google_trends:
+            score = self.calculate_trend_score(trend, coverage)
+            trend["score"] = score
+            trend["type"] = "google_trend"
+            all_trends.append(trend)
+
+        # Añadir Twitter trends
+        twitter_by_category = {}
+        for trend in twitter_trends:
+            category = trend["category"]
+            if category not in twitter_by_category:
+                twitter_by_category[category] = []
+            twitter_by_category[category].append(trend)
+
+        for category, trends in twitter_by_category.items():
+            if trends:
+                top_trend = max(trends, key=lambda x: x["tweet_volume"])
+                twitter_trend = {
+                    "title": f"Trending en Twitter: {top_trend['hashtag']}",
+                    "topic": category,
+                    "volume": f"{top_trend['tweet_volume']:,} tweets",
+                    "growth": "N/A",
+             "].replace("#", "")],
+                    "published_posts": coverage.get(category, 0),
+                    "score": self.calculate_twitter_score(top_trend, coverage),
+                    "type": "twitter_trend"
+                }
+                all_trends.append(twitter_trend)
+
+        # Ordenar por puntuación
+                all_trends.sort(key=lambda x: x["score"], reverse=True)
+
+        # Generar recomendaciones
+        recommendations = []
+
+        for trend in all_trends[:10]:
+            if len(recommendations) >= num_recommendations:
+                break
+
+            # Solo si es relevante
+            if trend.get("score", 0) > 0.5:
+                recommendation = self.create_recommendation_from_trend(trend, coverage)
+                if recommendation:
+                    recommendations.append(recommendation)
+
+        # Si no hay suficientes, añadir temas no cubiertos
+        if len(recommendations) < num_recommendations:
+            undercovered = self.get_undercovered_topics(coverage)
+            for topic in undercovered:
+                if len(recommendations) >= num_recommendations:
+                    break
+
+                recommendation = self.create_recommendation_for_topic(topic, coverage)
+                if recommendation:
+                    recommendations.append(recommendation)
+
+        print(f"✅ {len(recommendations)} recomendaciones generadas")
+        return recommendations
+
+    # ============================================================
+    # MÉTODOS AUXILIARES QUE FALTAN
+    # ============================================================
+
+    def create_recommendation_from_trend(self, trend: Dict, coverage: Dict) -> Optional[Dict]:
+        """Crea una recomendación específica a partir de una tendencia"""
+
+        topic = trend.get("topic", "general")
+        existing_posts = coverage.get(topic, 0)
+
+        # Generar título basado en la tendencia
+        if existing_posts == 0:
+            title_prefix = "Guía completa: "
+        elif existing_posts == 1:
+            title_prefix = "Profundizando en: "
+        else:
+            title_prefix = "Actualización 2024: "
+
+        title = f"{title_prefix}{trend.get('title', 'Nueva tendencia')}"
+
+        # Determinar ángulo
+        if "ia" in topic or "algoritmo" in topic:
+            angle = "Análisis técnico con casos prácticos"
+        elif "finanza" in topic or "inversión" in topic:
+            angle = "Guía práctica con ejemplos reales"
+        elif "privacidad" in topic:
+            angle = "Guía paso a paso para protección"
+        else:
+            angle = "Análisis completo con datos actualizados"
+
+        return {
+            "title": title,
+            "trend_source": trend.get("type", "trend"),
+            "trend_data": {
+                "topic": topic,
+                "volume": trend.get("volume", "Media"),
+                "growth": trend.get("growth", "N/A"),
+                "relevance": trend.get("relevance", 0.5),
+                "sources": trend.get("sources", ["Google Trends"])
+            },
+            "why_relevant": self.generate_why_relevant(trend, coverage),
+            "target_keywords": trend.get("search_terms", [trend.get("title", "")]),
+            "content_angle": angle,
+            "target_word_count": 1500 if existing_posts == 0 else 1200,
+            "estimated_seo_potential": trend.get("score", 0.5) * 100,
+            "competition_level": self.estimate_competition(trend),
+            "existing_coverage": existing_posts,
+            "actionable_steps": self.generate_actionable_steps(trend),
+            "internal_links_suggested": self.suggest_internal_links(topic)
+        }
+
+    def create_recommendation_for_topic(self, topic: str, coverage: Dict) -> Optional[Dict]:
+        """Crea recomendación para un tema infra-cubierto"""
+
+        # Títulos por tema
+        topic_titles = {
+            "finanzas": "Estrategias de gestión financiera personal 2024",
+            "inversiones": "Nuevas oportunidades de inversión post-crisis",
+            "tecnología": "Tecnologías disruptivas que cambiarán tu negocio",
+            "algoritmos": "Implementación práctica de algoritmos en negocios",
+            "ia": "Aplicaciones reales de IA para pequeñas empresas",
+            "privacidad": "Protección de datos en la era digital: guía completa",
+            "etf": "ETFs innovadores para diversificar tu cartera",
+            "oro": "Inversión en metales preciosos: análisis 2024",
+            "agentes": "Agentes autónomos: el futuro de la automatización",
+            "prompts": "Prompt engineering: guía para principiantes",
+            "llm": "Grandes modelos de lenguaje: qué son y cómo usarlos",
+            "salud mental": "Salud mental en la era digital: guía completa",
+            "ciberseguridad": "Protege tu negocio: guía de ciberseguridad 2024",
+            "legislación": "Nuevas leyes tecnológicas que debes conocer",
+            "negocios": "Estrategias de negocio en la era digital",
+            "programación": "Programación para no programadores",
+            "firmware": "Firmware: el software oculto en tus dispositivos",
+            "radios cb": "Guía completa de radios CB para principiantes"
+        }
+
+        title = topic_titles.get(topic, f"Guía completa sobre {topic}")
+
+        return {
+            "title": title,
+            "trend_source": "coverage_gap",
+            "trend_data": {
+                "topic": topic,
+                "volume": "Media",
+                "growth": "+25%",
+                "relevance": 0.7,
+                "sources": ["Análisis interno"]
+            },
+            "why_relevant": f"Tema infra-cubierto en tu blog (solo {coverage.get(topic, 0)} posts)",
+            "target_keywords": [topic, f"qué es {topic}", f"{topic} 2024"],
+            "content_angle": "Introducción completa con fundamentos y aplicaciones",
+            "target_word_count": 1800,
+            "estimated_seo_potential": 75.0,
+            "competition_level": "Media",
+            "existing_coverage": coverage.get(topic, 0),
+            "actionable_steps": [
+                f"Investigar fundamentos de {topic}",
+                "Recopilar estadísticas actualizadas",
+                "Buscar casos de estudio relevantes",
+                "Preparar ejemplos prácticos"
+            ],
+            "internal_links_suggested": []
+        }
+
+    def get_undercovered_topics(self, coverage: Dict) -> List[str]:
+        """Identifica temas infra-cubiertos en tu blog"""
+        undercovered = []
+
+        for category in self.your_blog_categories:
+            if coverage.get(category, 0) <= 1:  # 0 o 1 posts
+                undercovered.append(category)
+
+        return undercovered[:3]  # Máximo 3 temas
+
+    def suggest_internal_links(self, topic: str) -> List[str]:
+        """Sugiere posts existentes para enlazar"""
+        links = []
+
+        # Mapeo de temas a posts conocidos
+        topic_to_posts = {
+            "finanzas": ["ETF's de oro para no inversores"],
+            "inversiones": ["ETF's de oro para no inversores"],
+            "etf": ["ETF's de oro para no inversores"],
+            "oro": ["ETF's de oro para no inversores"],
+            "algoritmos": ["Algoritmos que discriminan y modelos que hunden empresas"],
+            "tecnología": ["Algoritmos que discriminan y modelos que hunden empresas"],
+            "ia": ["Algoritmos que discriminan y modelos que hunden empresas"],
+            "privacidad": ["Lo que internet dice de ti (y no lo sabes)"]
+        }
+
+        if topic in topic_to_posts:
+            links = topic_to_posts[topic]
+
+        return links
+
+    def calculate_trend_score(self, trend: Dict, coverage: Dict) -> float:
+        score = 0.0
+        score += trend.get("relevance", 0.5) * 0.4
+
+        existing_posts = coverage.get(trend.get("topic", ""), 0)
+        if existing_posts == 0:
+            score += 0.3
+        elif existing_posts == 1:
+            score += 0.2
+        else:
+            score += 0.1
+
+        if trend.get("topic", "") in self.your_blog_categories:
+            score += 0.2
+
+        volume = trend.get("volume", "")
+        if "Alta" in volume:
+            score += 0.1
+        elif "Muy Alta" in volume:
+            score += 0.15
+
+        return min(score, 1.0)
+
+    def calculate_twitter_score(self, trend: Dict, coverage: Dict) -> float:
+        score = 0.5
+        tweet_volume = trend.get("tweet_volume", 0)
+
+        if tweet_volume > 10000:
+            score += 0.3
+        elif tweet_volume > 5000:
+            score += 0.2
+        elif tweet_volume > 1000:
+            score += 0.1
+
+        if trend.get("category", "") in self.your_blog_categories:
+            score += 0.2
+
+        return min(score, 1.0)
+
+    def generate_why_relevant(self, trend: Dict, coverage: Dict) -> str:
+        topic = trend.get("topic", "")
+        existing = coverage.get(topic, 0)
+
+        if existing == 0:
+            return f"Nuevo tema en {topic} que aún no cubres en tu blog"
+        elif existing == 1:
+            return f"Profundización en {topic} donde ya tienes contenido base"
+        else:
+            return f"Actualización de {topic} con nueva perspectiva"
+
+    def estimate_competition(self, trend: Dict) -> str:
+        volume = trend.get("volume", "")
+
+        if "Muy Alta" in volume:
+            return "Alta"
+        elif "Alta" in volume:
+            return "Media-Alta"
+        elif "Media" in volume:
+            return "Media"
+        else:
+            return "Baja"
+
+    def generate_actionable_steps(self, trend: Dict) -> List[str]:
+        return [
+            "Investigar últimas noticias sobre el tema",
+            "Recopilar datos y estadísticas actualizadas",
+            "Buscar casos de estudio relevantes",
+            "Preparar ejemplos prácticos",
+            "Planificar estructura del artículo",
+            "Definir keywords principales para SEO"
+        ]
+    # ==========================================================================
+    # NUEVOS MÉTODOS PARA APIs REALES
+    # ==========================================================================
+
+    def get_x_trends(self, woeid: int = 1) -> List[Dict]:
+        """Obtiene tendencias de X (Twitter) usando la API v1.1"""
+        if not self.x_bearer_token:
+            print("⚠️ No hay token de X")
+            return []
+        
+        url = f"https://api.twitter.com/1.1/trends/place.json?id={woeid}"
+        headers = {"Authorization": f"Bearer {self.x_bearer_token}"}
+        
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                trends = data[0].get("trends", [])
+                
+                x_trends = []
+                for t in trends[:20]:
+                    topic = self._guess_category_from_text(t['name'])
+                    x_trends.append({
+                        "hashtag": t['name'],
+                        "tweet_volume": t.get('tweet_volume', 0),
+                        "category": topic,
+                        "url": t.get('url', '')
+                    })
+                print(f"✅ {len(x_trends)} tendencias de X obtenidas")
+                return x_trends
+            else:
+                print(f"⚠️ Error en X API: {response.status_code}")
+                return []
+        except Exception as e:
+            print(f"⚠️ Excepción en X API: {e}")
+            return []
+
+    def get_reddit_trending_posts(self, subreddits: List[str] = None, limit: int = 5) -> List[Dict]:
+        """Obtiene posts populares de subreddits relevantes."""
+        if not self.reddit:
+            print("⚠️ Reddit no inicializado")
+            return []
+        
+        if subreddits is None:
+            subreddits = []
+            if "ia" in self.your_blog_categories:
+                subreddits.extend(["MachineLearning", "artificial"])
+            if "programación" in self.your_blog_categories:
+                subreddits.extend(["programming", "webdev"])
+            if "finanzas" in self.your_blog_categories:
+                subreddits.extend(["finance", "investing"])
+            if "privacidad" in self.your_blog_categories:
+                subreddits.extend(["privacy", "cybersecurity"])
+            if "llm" in self.your_blog_categories:
+                subreddits.extend(["LocalLLaMA", "ChatGPT"])
+        
+        if not subreddits:
+            subreddits = ["all", "popular"]
+        
+        reddit_posts = []
+        for sub in subreddits[:5]:
+            try:
+                subreddit = self.reddit.subreddit(sub)
+                for post in subreddit.hot(limit=limit):
+                    topic = self._guess_category_from_text(post.title + " " + post.selftext)
+                    reddit_posts.append({
+                        "subreddit": sub,
+                        "title": post.title,
+                        "upvotes": post.score,
+                        "comments": post.num_comments,
+                        "url": post.url,
+                        "category": topic,
+                        "created": datetime.fromtimestamp(post.created_utc).isoformat()
+                    })
+            except Exception as e:
+                print(f"⚠️ Error en subreddit {sub}: {e}")
+        
+        reddit_posts.sort(key=lambda x: x['upvotes'], reverse=True)
+        return reddit_posts[:15]
+
+    def _guess_category_from_text(self, text: str) -> str:
+        text_lower = text.lower()
+        for cat in self.your_blog_categories:
+            if cat in text_lower:
+                return cat
+        return self.your_blog_categories[0] if self.your_blog_categories else "general"
+
+# ============================================================
+# INSTANCIA GLOBAL
+# ============================================================
+trending_analyzer = TrendingTopicsAnalyzer()

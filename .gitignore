@@ -1,0 +1,35 @@
+# Entornos y configuraciones sensibles
+.env
+.env.*
+temp_env.txt
+
+# Datos y volúmenes
+data/
+*/data/
+*_data/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+
+# Logs
+*.log
+
+# Credenciales / certificados
+nginx/ssl/
+*.pem
+*.key
+
+# Backups
+*.backup*
+*backup*.py
+
+# Streamlit
+.streamlit/
+
+# VSCode / IDEs
+.vscode/
+.idea/
